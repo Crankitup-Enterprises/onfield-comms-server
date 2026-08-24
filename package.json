@@ -1,0 +1,13 @@
+{
+  "name": "coachcom-token-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"dev": "node --watch index.js", "start": "node index.js"},
+  "dependencies": {
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "livekit-server-sdk": "latest"
+  }
+}
