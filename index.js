@@ -47,6 +47,7 @@ app.post('/api/token', async (req, res) => {
       room: practiceId,
       canPublish: true,
       canSubscribe: true,
+      canUpdateOwnMetadata: true,
     });
 
     res.json({
@@ -83,7 +84,7 @@ app.get('/api/test-token', async (req, res) => {
       metadata,
       ttl: '8h',
     });
-    token.addGrant({ roomJoin: true, room: practiceId, canPublish: true, canSubscribe: true });
+    token.addGrant({ roomJoin: true, room: practiceId, canPublish: true, canSubscribe: true, canUpdateOwnMetadata: true });
     const jwt = await token.toJwt();
 
     res.setHeader('Content-Type', 'text/html');
