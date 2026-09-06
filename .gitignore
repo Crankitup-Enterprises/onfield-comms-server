@@ -1,0 +1,3 @@
+# Per-team call-log email addresses, entered by coaches from the app (see /api/call-log-email
+# in index.js). Runtime data, not source -- same treatment as agent/logs/.
+data/
