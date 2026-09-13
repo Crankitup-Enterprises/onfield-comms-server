@@ -36,6 +36,33 @@ function saveCallLogEmails() {
   fs.writeFileSync(callLogEmailsPath, JSON.stringify(callLogEmails, null, 2));
 }
 
+// Durable, browsable storage for finished play-call transcripts. Before this existed, the ONLY
+// copy of a session's transcript was a single Resend email sent from agent/index.js -- and that
+// email has been confirmed broken (the Resend sandbox sender can only deliver to Chris's own
+// signup address, not a real coach's inbox), which meant a whole practice's dictation could be
+// silently lost with no way to recover it. Now agent/index.js saves the full transcript here
+// FIRST, unconditionally, and email is just a best-effort notification on top of that. One JSON
+// index + one flat text file per session -- plenty durable for this project's scale. Not
+// committed to git (see .gitignore), same treatment as call-log-emails.json.
+const transcriptsDir = path.join(dataDir, 'transcripts');
+const transcriptFilesDir = path.join(transcriptsDir, 'files');
+const transcriptsIndexPath = path.join(transcriptsDir, 'index.json');
+fs.mkdirSync(transcriptFilesDir, { recursive: true });
+
+function loadTranscriptIndex() {
+  try {
+    return JSON.parse(fs.readFileSync(transcriptsIndexPath, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+let transcriptIndex = loadTranscriptIndex();
+
+function saveTranscriptIndex() {
+  fs.writeFileSync(transcriptsIndexPath, JSON.stringify(transcriptIndex, null, 2));
+}
+
 const priorities = {
   head_coach: 100,
   offensive_coordinator: 80,
@@ -186,11 +213,73 @@ app.get('/api/test-token', async (req, res) => {
   }
 });
 
-// Placeholder for the next increment. Mobile/server can post timestamped transcript chunks here.
-app.post('/api/transcript', (req, res) => {
-  const { practiceId, speaker, role, text, timestamp = new Date().toISOString() } = req.body;
-  console.log('[TRANSCRIPT]', { practiceId, speaker, role, text, timestamp });
-  res.json({ ok: true });
+// Saves a finished practice's full play-call transcript, called once by agent/index.js at
+// session end (see the comment above transcriptsDir for why this exists). practiceId is
+// resolved through the same alias table as everything else so "onfield-02" and "dexter"
+// transcripts land together under one team, not split by whichever code happened to be typed.
+app.post('/api/transcripts', (req, res) => {
+  const { practiceId: rawPracticeId, sessionDate, text } = req.body;
+  if (!rawPracticeId || !text) return res.status(400).json({ error: 'practiceId and text are required' });
+  const practiceId = resolveTeamCode(rawPracticeId) || rawPracticeId;
+  const savedAt = new Date().toISOString();
+  const id = `${practiceId}-${savedAt.replace(/[:.]/g, '-')}`;
+  const filename = `${id}.txt`;
+  fs.writeFileSync(path.join(transcriptFilesDir, filename), text);
+  const lineCount = text.split('\n').filter(Boolean).length;
+  transcriptIndex.unshift({
+    id,
+    practiceId,
+    teamName: TEAM_CODES[practiceId] || practiceId,
+    sessionDate: sessionDate || savedAt.slice(0, 10),
+    savedAt,
+    filename,
+    lineCount,
+  });
+  saveTranscriptIndex();
+  res.json({ ok: true, id });
+});
+
+// Lists saved transcripts, optionally filtered to one team -- used by the /transcripts page
+// below and available for the mobile app to consume later if it wants an in-app list too.
+app.get('/api/transcripts', (req, res) => {
+  const { practiceId: rawPracticeId } = req.query;
+  const practiceId = rawPracticeId ? (resolveTeamCode(rawPracticeId) || rawPracticeId) : null;
+  const list = practiceId ? transcriptIndex.filter(t => t.practiceId === practiceId) : transcriptIndex;
+  res.json({ transcripts: list });
+});
+
+app.get('/api/transcripts/:id/download', (req, res) => {
+  const entry = transcriptIndex.find(t => t.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: 'Transcript not found' });
+  res.setHeader('Content-Disposition', `attachment; filename="${entry.filename}"`);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.sendFile(path.join(transcriptFilesDir, entry.filename));
+});
+
+// Simple, no-login browsable page listing every saved session with a one-click download --
+// this is the "link or page" Chris asked for so coaches can get at the dictation for building
+// play sheets without going through Chris's laptop or a flaky email.
+app.get('/transcripts', (req, res) => {
+  const rows = transcriptIndex.map(t => `
+    <tr>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;">${t.teamName}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;">${t.sessionDate}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;">${new Date(t.savedAt).toLocaleString()}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;">${t.lineCount}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;"><a href="/api/transcripts/${t.id}/download">Download</a></td>
+    </tr>`).join('');
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!doctype html>
+<html><body style="font-family:-apple-system,sans-serif;padding:24px;max-width:900px;margin:0 auto;">
+  <h2>OnField Comms — Saved Transcripts</h2>
+  ${transcriptIndex.length === 0 ? '<p>No transcripts saved yet -- they show up here automatically once a practice with the head coach or a coordinator talking finishes.</p>' : `
+  <table style="width:100%;border-collapse:collapse;">
+    <thead><tr style="text-align:left;border-bottom:2px solid #333;">
+      <th style="padding:8px 12px;">Team</th><th style="padding:8px 12px;">Date</th><th style="padding:8px 12px;">Saved</th><th style="padding:8px 12px;">Lines</th><th style="padding:8px 12px;">Transcript</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`}
+</body></html>`);
 });
 
 // Very loose on purpose -- this only guards against obviously-broken input (a typo with no @,
