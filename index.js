@@ -60,12 +60,60 @@ const priorities = {
   video_assistant: 40,
 };
 
+// Canonical team code -> human team name. This is the source of truth for which codes are
+// real. Before this existed, /api/token accepted ANY string a coach typed and used it directly
+// as the LiveKit room name -- a single fat-fingered character (missing the leading zero,
+// "onfield-2" instead of "onfield-02") silently created a brand-new, empty room instead of
+// failing. That's exactly what happened during the 2026-09-10 field test: a coach and the
+// video coordinator each spent several minutes alone in rooms nobody else was in, unable to
+// hear anyone, with no error telling them why. Now an unrecognized code is rejected up front.
+//
+// Team codes are also moving from the old onfield-01/onfield-02/... numbering to short,
+// one-word team names -- much harder to mistype than a hyphenated number with a leading zero.
+// Old numeric codes are kept working via TEAM_CODE_ALIASES below so nobody who already wrote
+// one down on a whiteboard gets locked out.
+//
+// To onboard a new team: add its code here (and, only if renaming an existing team, an alias
+// below pointing old -> new), redeploy this server, then update claude/pilot-teams-roster.md.
+const TEAM_CODES = {
+  'practice-demo': 'Demo / Testing',
+  dexter: 'Dexter Football',
+  redhook: 'Red Hook Athletics',
+};
+
+// Legacy/alternate code -> the canonical code it should resolve to. Resolving to the SAME
+// canonical string is what matters here -- if "onfield-02" and "dexter" resolved to two
+// different room names, coaches using different codes for the same team would once again be
+// silently split into separate rooms, just one layer further down than the original bug.
+const TEAM_CODE_ALIASES = {
+  'onfield-01': 'redhook',
+  'onfield-02': 'dexter',
+};
+
+// Normalizes and resolves a typed team code to its canonical form, or null if it isn't a code
+// this server knows about at all. The mobile app already does heavier normalization
+// client-side (stripping punctuation etc.) before sending practiceId, but we don't trust that
+// blindly here -- this is the actual gate that decides whether a room gets created.
+function resolveTeamCode(raw) {
+  const normalized = String(raw || '').trim().toLowerCase();
+  if (TEAM_CODES[normalized]) return normalized;
+  if (TEAM_CODE_ALIASES[normalized]) return TEAM_CODE_ALIASES[normalized];
+  return null;
+}
+
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'coachcom-token-server' }));
 
 app.post('/api/token', async (req, res) => {
   try {
     const { name, role, side, practiceId = 'practice-demo' } = req.body;
     if (!name || !role || !side) return res.status(400).json({ error: 'name, role and side are required' });
+
+    const resolvedTeamCode = resolveTeamCode(practiceId);
+    if (!resolvedTeamCode) {
+      return res.status(404).json({
+        error: `Team code "${practiceId}" isn't recognized. Double check it with your coach.`,
+      });
+    }
 
     const priority = priorities[role] ?? 10;
     const identity = `${role}:${name}:${Date.now()}`;
@@ -80,7 +128,7 @@ app.post('/api/token', async (req, res) => {
 
     token.addGrant({
       roomJoin: true,
-      room: practiceId,
+      room: resolvedTeamCode,
       canPublish: true,
       canSubscribe: true,
     });
@@ -90,7 +138,7 @@ app.post('/api/token', async (req, res) => {
       url: process.env.LIVEKIT_URL,
       identity,
       priority,
-      practiceId,
+      practiceId: resolvedTeamCode,
     });
   } catch (error) {
     console.error(error);
@@ -107,7 +155,7 @@ app.get('/api/test-token', async (req, res) => {
     const name = req.query.name || 'Test Coach 2';
     const role = req.query.role || 'head_coach';
     const side = req.query.side || 'all';
-    const practiceId = req.query.practiceId || 'practice-demo';
+    const practiceId = resolveTeamCode(req.query.practiceId) || req.query.practiceId || 'practice-demo';
 
     const priority = priorities[role] ?? 10;
     const identity = `${role}:${name}:${Date.now()}`;
@@ -156,8 +204,9 @@ const EMAIL_LIKE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // code so it's set once per team, by whichever coach gets to it first, not per-practice or
 // per-phone: that's what makes this "not something Chris has to configure for each room."
 app.post('/api/call-log-email', (req, res) => {
-  const { practiceId, email } = req.body;
-  if (!practiceId) return res.status(400).json({ error: 'practiceId is required' });
+  const { practiceId: rawPracticeId, email } = req.body;
+  if (!rawPracticeId) return res.status(400).json({ error: 'practiceId is required' });
+  const practiceId = resolveTeamCode(rawPracticeId) || rawPracticeId;
   const trimmed = (email || '').trim();
   if (trimmed && !EMAIL_LIKE.test(trimmed)) {
     return res.status(400).json({ error: 'That doesn\'t look like a valid email address' });
@@ -176,8 +225,9 @@ app.post('/api/call-log-email', (req, res) => {
 // the app is what the finished transcript goes to. Also used by the app itself to show the
 // currently-saved address on the CALL LOG screen.
 app.get('/api/call-log-email', (req, res) => {
-  const { practiceId } = req.query;
-  if (!practiceId) return res.status(400).json({ error: 'practiceId is required' });
+  const { practiceId: rawPracticeId } = req.query;
+  if (!rawPracticeId) return res.status(400).json({ error: 'practiceId is required' });
+  const practiceId = resolveTeamCode(rawPracticeId) || rawPracticeId;
   res.json({ email: callLogEmails[practiceId] || null });
 });
 
